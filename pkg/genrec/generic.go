@@ -9,6 +9,7 @@ import (
 	v1 "k8s.io/api/core/v1"
 	kmetav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -27,8 +28,9 @@ type Subject interface {
 }
 
 type Reconciler[S Subject, C any] struct {
-	Logic  Logic[S, C]
-	Client k8sutil.SchemedClient
+	Logic    Logic[S, C]
+	Client   k8sutil.SchemedClient
+	Recorder record.EventRecorder
 
 	KeyNamespace     string
 	CurrentPartition string
@@ -89,6 +91,7 @@ func (t WithoutFinalizationMixin[S, C]) Finalize(_ *Context[S, C]) error {
 type Context[S Subject, C any] struct {
 	types.NamespacedName
 	context.Context
+	record.EventRecorder
 	Subject S
 	Owner   *Reconciler[S, C]
 	Config  C
@@ -165,18 +168,23 @@ func (g *Reconciler[_, _]) SetupWithManager(mgr ctrl.Manager) error {
 }
 
 func (g *Reconciler[S, C]) Reconcile(ctx context.Context, request reconcile.Request) (reconcile.Result, error) {
-	return g.reconcile(&Context[S, C]{
+	rctx := &Context[S, C]{
 		NamespacedName: request.NamespacedName,
 		Context:        ctx,
 		Owner:          g,
 		Config:         g.Logic.GetConfig(),
+		EventRecorder:  g.Recorder,
 		Log:            log.FromContext(ctx),
 		Client: &k8sutil.ContextClient{
 			SchemedClient: g.Client,
 			Context:       ctx,
 			Namespace:     request.Namespace,
 		},
-	})
+	}
+	if rctx.EventRecorder == nil {
+		rctx.EventRecorder = &record.FakeRecorder{}
+	}
+	return g.reconcile(rctx)
 }
 
 func (g *Reconciler[S, C]) reconcile(ctx *Context[S, C]) (reconcile.Result, error) {
