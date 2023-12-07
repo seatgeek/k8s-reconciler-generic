@@ -52,7 +52,7 @@ func (r ResourceHandler[C]) WithIsSensitive(v bool) ResourceHandler[C] {
 }
 
 func (r ResourceHandler[C]) WithDeleteOnChange(v bool) ResourceHandler[C] {
-	r.IsSensitive = v
+	r.DeleteOnChange = v
 	return r
 }
 
