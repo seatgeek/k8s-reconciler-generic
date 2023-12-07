@@ -108,6 +108,17 @@ func UpsertContainer(containers *[]kv1.Container, container kv1.Container) {
 	*containers = append(*containers, container)
 }
 
+func FindEnv(name string, evl ...[]kv1.EnvVar) *kv1.EnvVar {
+	for _, list := range evl {
+		for i := range list {
+			if list[i].Name == name {
+				return &(list[i])
+			}
+		}
+	}
+	return nil
+}
+
 func FindContainer(name string, containerLists ...[]kv1.Container) *kv1.Container {
 	for _, list := range containerLists {
 		for i := range list {
