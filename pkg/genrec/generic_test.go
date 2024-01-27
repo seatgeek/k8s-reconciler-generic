@@ -30,7 +30,7 @@ func TestContext_SelectorForObject(t *testing.T) {
 		name    string
 		context Context[*testSubject, any]
 		args    args
-		want    v1.LabelSelector
+		want    *v1.LabelSelector
 	}
 	testContext := Context[*testSubject, any]{
 		NamespacedName: types.NamespacedName{Name: "testobj"},
@@ -41,7 +41,7 @@ func TestContext_SelectorForObject(t *testing.T) {
 			name:    "empty",
 			context: testContext,
 			args:    args{},
-			want: v1.LabelSelector{
+			want: &v1.LabelSelector{
 				MatchLabels: map[string]string{
 					"test.io/owner":     "testobj",
 					"test.io/component": "",
@@ -52,7 +52,7 @@ func TestContext_SelectorForObject(t *testing.T) {
 			name:    "tier-only",
 			context: testContext,
 			args:    args{tier: "web"},
-			want: v1.LabelSelector{
+			want: &v1.LabelSelector{
 				MatchLabels: map[string]string{
 					"test.io/owner":     "testobj",
 					"test.io/component": "web",
@@ -63,7 +63,7 @@ func TestContext_SelectorForObject(t *testing.T) {
 			name:    "tier-and-suffix",
 			context: testContext,
 			args:    args{tier: "web", suffix: "public"},
-			want: v1.LabelSelector{
+			want: &v1.LabelSelector{
 				MatchLabels: map[string]string{
 					"test.io/owner":     "testobj",
 					"test.io/component": "web-public",
@@ -74,7 +74,7 @@ func TestContext_SelectorForObject(t *testing.T) {
 			name:    "suffix-only",
 			context: testContext,
 			args:    args{suffix: "tls"},
-			want: v1.LabelSelector{
+			want: &v1.LabelSelector{
 				MatchLabels: map[string]string{
 					"test.io/owner":     "testobj",
 					"test.io/component": "tls",
