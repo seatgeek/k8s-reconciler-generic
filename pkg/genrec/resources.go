@@ -188,6 +188,7 @@ func (rd ResourceDiffs) Issues(issuesFunc func(object client.Object) []string) [
 var calcOptions = []om.CalculateOption{
 	om.IgnoreStatusFields(),
 	om.IgnoreVolumeClaimTemplateTypeMetaAndStatus(),
+	ignorePDBSelector,
 }
 
 func (rd ResourceDiff) Apply(ctx context.Context, sc k8sutil.SchemedClient, owner client.Object) error {
