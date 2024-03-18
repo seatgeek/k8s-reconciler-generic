@@ -192,7 +192,7 @@ func (c *Context[_, _]) ResolveSecretKeyRef(ref apiobjects.SecretKeyRef) (string
 	return "", fmt.Errorf("required secret %q or key %q not found", ref.Secret, ref.Key)
 }
 
-// SetRequeue configures the controller to requeue the same object after a certain about of time. During the lifetime
+// SetRequeue configures the controller to requeue the same object after a certain amount of time. During the lifetime
 // of a context, user code (in Logic[] implementations) may call this multiple times, and the lowest value wins.
 // Note that setting a requeue is NOT an error. And you can create a requeue for an otherwise-successful reconciliation,
 // for example because you are synchronizing non-k8s resources. If you need to abort reconciliation, use an error.
