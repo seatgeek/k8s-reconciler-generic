@@ -81,7 +81,7 @@ type Logic[S Subject, C any] interface {
 	ExtraAnnotationsForObject(c *Context[S, C], tier, suffix string) map[string]string
 	// ApplyUnmanaged is called after all managed resources have been applied successfully, to give the Logic
 	// a chance to reconcile non-k8s resources.
-	ApplyUnmanaged() error
+	ApplyUnmanaged(*Context[S, C]) error
 }
 
 // WithoutFinalizationMixin ia a convenience type to embed in your Logic if you don't need finalization.
@@ -340,7 +340,7 @@ func (g *Reconciler[S, C]) reconcile(ctx *Context[S, C]) error {
 		}
 	}
 
-	if err = g.Logic.ApplyUnmanaged(); err != nil {
+	if err = g.Logic.ApplyUnmanaged(ctx); err != nil {
 		return err
 	}
 
