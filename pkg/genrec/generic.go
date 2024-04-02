@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 	"github.com/go-logr/logr"
-	apiobjects "github.com/seatgeek/k8s-reconciler-generic/apiobjects"
+	"github.com/seatgeek/k8s-reconciler-generic/apiobjects"
 	"github.com/seatgeek/k8s-reconciler-generic/apiobjects/apiutils"
 	"github.com/seatgeek/k8s-reconciler-generic/pkg/k8sutil"
 	v1 "k8s.io/api/core/v1"
@@ -82,6 +82,9 @@ type Logic[S Subject, C any] interface {
 	// ApplyUnmanaged is called after all managed resources have been applied successfully, to give the Logic
 	// a chance to reconcile non-k8s resources.
 	ApplyUnmanaged(*Context[S, C]) error
+	// ReconcileComplete runs unconditionally after a reconciliation, and sees the final context, any errors, and
+	// the terminal status of the reconcile attempt. It is a good place to do logging/metrics.
+	ReconcileComplete(*Context[S, C], ReconciliationStatus, error)
 }
 
 // WithoutFinalizationMixin ia a convenience type to embed in your Logic if you don't need finalization.
@@ -103,6 +106,7 @@ type Context[S Subject, C any] struct {
 	Owner        *Reconciler[S, C]
 	Config       C
 	Log          logr.Logger
+	Started      time.Time
 	Client       *k8sutil.ContextClient
 	RequeueAfter *time.Duration
 }
@@ -223,6 +227,7 @@ func (g *Reconciler[S, C]) Reconcile(ctx context.Context, request reconcile.Requ
 		Config:         g.Logic.GetConfig(),
 		EventRecorder:  g.Recorder,
 		Log:            log.FromContext(ctx),
+		Started:        time.Now(),
 		Client: &k8sutil.ContextClient{
 			SchemedClient: g.Client,
 			Context:       ctx,
@@ -233,7 +238,9 @@ func (g *Reconciler[S, C]) Reconcile(ctx context.Context, request reconcile.Requ
 		rctx.EventRecorder = &record.FakeRecorder{}
 	}
 	var rr reconcile.Result
-	if err := g.reconcile(rctx); err != nil {
+	err, terminalState := g.reconcile(rctx)
+	g.Logic.ReconcileComplete(rctx, terminalState, err)
+	if err != nil {
 		return rr, err
 	}
 	if rctx.RequeueAfter != nil {
@@ -243,7 +250,27 @@ func (g *Reconciler[S, C]) Reconcile(ctx context.Context, request reconcile.Requ
 	return rr, nil
 }
 
-func (g *Reconciler[S, C]) reconcile(ctx *Context[S, C]) error {
+type ReconciliationStatus string
+
+const (
+	FetchError             ReconciliationStatus = "FetchError"
+	SubjectNotFound        ReconciliationStatus = "SubjectNotFound"
+	PartitionMismatch      ReconciliationStatus = "PartitionMismatch"
+	SubjectSuspended       ReconciliationStatus = "SubjectSuspended"
+	SubjectInvalid         ReconciliationStatus = "SubjectInvalid"
+	AlreadyFinalized       ReconciliationStatus = "AlreadyFinalized"
+	FinalizationError      ReconciliationStatus = "FinalizationError"
+	FinalizersChanged      ReconciliationStatus = "FinalizersChanged"
+	FillDefaultsError      ReconciliationStatus = "FillDefaultsError"
+	ObserveResourcesError  ReconciliationStatus = "ObserveResourcesError"
+	GenerateResourcesError ReconciliationStatus = "GenerateResourcesError"
+	FillStatusError        ReconciliationStatus = "FillStatusError"
+	UpdateStatusError      ReconciliationStatus = "UpdateStatusError"
+	ApplyError             ReconciliationStatus = "ApplyError"
+	Okay                   ReconciliationStatus = "Okay"
+)
+
+func (g *Reconciler[S, C]) reconcile(ctx *Context[S, C]) (error, ReconciliationStatus) {
 	var err error
 
 	// step 1:
@@ -251,34 +278,34 @@ func (g *Reconciler[S, C]) reconcile(ctx *Context[S, C]) error {
 	// exit immediately if it is ineligible, for a variety of reasons:
 
 	if ctx.Subject, err = k8sutil.FetchInto(g.Logic.NewSubject, ctx.Name, ctx.Client); err != nil {
-		return err
+		return err, FetchError
 	}
 
 	if g.Logic.IsSubjectNil(ctx.Subject) {
 		ctx.Log.Info("subject is physically deleted")
-		return err
+		return nil, SubjectNotFound
 	}
 
 	if subjPartition := ctx.Subject.GetAnnotations()[g.LabelKey("partition")]; g.CurrentPartition != subjPartition {
 		ctx.Log.Info("subject resides in a different controller partition",
 			"subjPartition", subjPartition,
 			"currentPartition", g.CurrentPartition)
-		return nil
+		return nil, PartitionMismatch
 	}
 
 	if ctx.Subject.IsSuspended() {
 		ctx.Log.Info("subject is suspended")
-		return nil
+		return nil, SubjectSuspended
 	}
 
 	if err = g.Logic.Validate(ctx.Subject); err != nil {
 		ctx.Log.Error(err, "subject failed validation, cannot reconcile")
-		return err
+		return err, SubjectInvalid
 	}
 
 	if fk := g.Logic.FinalizerKey(); fk != "" {
-		if abortReconciliation, err := g.manageFinalizers(ctx, fk); err != nil || abortReconciliation {
-			return err
+		if abortReconciliation, err, rs := g.manageFinalizers(ctx, fk); err != nil || abortReconciliation {
+			return err, rs
 		}
 	}
 
@@ -287,7 +314,7 @@ func (g *Reconciler[S, C]) reconcile(ctx *Context[S, C]) error {
 
 	if err = g.Logic.FillDefaults(ctx); err != nil {
 		// NOTE: we FillDefaults _after_ Validate, it is allowed to fill illegal defaults, e.g. for derived fields
-		return err
+		return err, FillDefaultsError
 	}
 
 	// step 2:
@@ -298,11 +325,11 @@ func (g *Reconciler[S, C]) reconcile(ctx *Context[S, C]) error {
 	var observedResources, desiredResources Resources
 
 	if observedResources, err = g.Logic.ObserveResources(ctx); err != nil {
-		return err
+		return err, ObserveResourcesError
 	}
 
 	if desiredResources, err = g.Logic.GenerateResources(ctx); err != nil {
-		return err
+		return err, GenerateResourcesError
 	}
 
 	// step 3: update status
@@ -314,12 +341,12 @@ func (g *Reconciler[S, C]) reconcile(ctx *Context[S, C]) error {
 		ObservedGeneration: ctx.Subject.GetGeneration(),
 		Issues:             resourceDiffs.Issues(g.Logic.ResourceIssues),
 	}); err != nil {
-		return err
+		return err, FillStatusError
 	}
 
 	if !g.Logic.IsStatusEqual(origSubject, ctx.Subject) {
 		if err = g.Client.Status().Update(ctx, ctx.Subject); err != nil {
-			return err
+			return err, UpdateStatusError
 		}
 	}
 
@@ -336,38 +363,38 @@ func (g *Reconciler[S, C]) reconcile(ctx *Context[S, C]) error {
 	for _, rd := range resourceDiffs {
 		// apply the diffs in order (the same order as returned by GenerateResources, with deletes prepended)
 		if err = rd.Apply(ctx, g.Client, ctx.Subject); err != nil {
-			return err
+			return err, ApplyError
 		}
 	}
 
 	if err = g.Logic.ApplyUnmanaged(ctx); err != nil {
-		return err
+		return err, ApplyError
 	}
 
-	return nil
+	return nil, Okay
 }
 
-func (g *Reconciler[S, C]) manageFinalizers(ctx *Context[S, C], fk string) (bool, error) {
+func (g *Reconciler[S, C]) manageFinalizers(ctx *Context[S, C], fk string) (bool, error, ReconciliationStatus) {
 	hasOurFinalizer := controllerutil.ContainsFinalizer(ctx.Subject, fk)
 	if ds := ctx.Subject.GetDeletionTimestamp(); !ds.IsZero() {
 		ctx.Log.Info("subject is logically deleted", "deletionTimestamp", ds)
 		if !hasOurFinalizer {
-			return true, nil // we already finalized it
+			return true, nil, AlreadyFinalized // we already finalized it
 		}
 		ctx.Log.Info("subject needs finalization", "finalizer", fk)
 		if err := g.Logic.Finalize(ctx); err != nil {
-			return true, err
+			return true, err, FinalizationError
 		}
 		ctx.Log.Info("subject was finalized", "finalizer", fk)
 		controllerutil.RemoveFinalizer(ctx.Subject, fk)
-		return true, g.Client.Update(ctx, ctx.Subject)
+		return true, g.Client.Update(ctx, ctx.Subject), FinalizersChanged
 	} else if !hasOurFinalizer {
 		// Subject IS NOT logically deleted and needs finalizer added
 		ctx.Log.Info("subject is live but missing finalizer key, adding", "finalizer", fk)
 		controllerutil.AddFinalizer(ctx.Subject, fk)
-		return true, g.Client.Update(ctx, ctx.Subject)
+		return true, g.Client.Update(ctx, ctx.Subject), FinalizersChanged
 	}
-	return false, nil
+	return false, nil, Okay
 }
 
 func (g *Reconciler[_, _]) LabelKey(s string) string {
