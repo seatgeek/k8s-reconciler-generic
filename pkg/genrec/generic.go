@@ -2,6 +2,7 @@ package genrec
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"github.com/go-logr/logr"
 	"github.com/seatgeek/k8s-reconciler-generic/apiobjects"
@@ -219,6 +220,12 @@ func (g *Reconciler[_, _]) SetupWithManager(mgr ctrl.Manager) error {
 	return cb.Complete(g)
 }
 
+// the below are not really "errors", they are special values
+// to influence the abstraction control flow:
+
+var ErrAbort = errors.New("abort reconciliation")
+var ErrRetry = errors.New("abort reconciliation with requeue")
+
 func (g *Reconciler[S, C]) Reconcile(ctx context.Context, request reconcile.Request) (reconcile.Result, error) {
 	rctx := &Context[S, C]{
 		NamespacedName: request.NamespacedName,
@@ -237,17 +244,30 @@ func (g *Reconciler[S, C]) Reconcile(ctx context.Context, request reconcile.Requ
 	if rctx.EventRecorder == nil {
 		rctx.EventRecorder = &record.FakeRecorder{}
 	}
-	var rr reconcile.Result
+
 	err, terminalState := g.reconcile(rctx)
 	g.Logic.ReconcileComplete(rctx, terminalState, err)
+
 	if err != nil {
-		return rr, err
+		if errors.Is(err, ErrAbort) {
+			return reconcile.Result{}, nil
+		} else if errors.Is(err, ErrRetry) {
+			return reconcile.Result{Requeue: true}, nil
+		} else {
+			// these are real errors that will trigger incrementing kubebuilder's
+			// controller_runtime_reconcile_errors_total metric:
+			return reconcile.Result{}, fmt.Errorf("reconciliation failed in state %v: %w", terminalState, err)
+		}
 	}
+
 	if rctx.RequeueAfter != nil {
-		rr.Requeue = true
-		rr.RequeueAfter = *rctx.RequeueAfter
+		return reconcile.Result{
+			Requeue:      true,
+			RequeueAfter: *rctx.RequeueAfter,
+		}, nil
 	}
-	return rr, nil
+
+	return reconcile.Result{}, nil
 }
 
 type ReconciliationStatus string
@@ -287,9 +307,10 @@ func (g *Reconciler[S, C]) reconcile(ctx *Context[S, C]) (error, ReconciliationS
 	}
 
 	if subjPartition := ctx.Subject.GetAnnotations()[g.LabelKey("partition")]; g.CurrentPartition != subjPartition {
-		ctx.Log.Info("subject resides in a different controller partition",
-			"subjPartition", subjPartition,
-			"currentPartition", g.CurrentPartition)
+		// do not allow subsequent code to see this subject anywhere, even in ReconcileComplete.
+		// it is not ours to observe:
+		var nilS S
+		ctx.Subject = nilS
 		return nil, PartitionMismatch
 	}
 
