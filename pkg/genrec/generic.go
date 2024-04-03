@@ -256,7 +256,7 @@ func (g *Reconciler[S, C]) Reconcile(ctx context.Context, request reconcile.Requ
 		} else {
 			// these are real errors that will trigger incrementing kubebuilder's
 			// controller_runtime_reconcile_errors_total metric:
-			return reconcile.Result{}, err
+			return reconcile.Result{}, fmt.Errorf("reconciliation failed in state %v: %w", terminalState, err)
 		}
 	}
 
@@ -307,9 +307,10 @@ func (g *Reconciler[S, C]) reconcile(ctx *Context[S, C]) (error, ReconciliationS
 	}
 
 	if subjPartition := ctx.Subject.GetAnnotations()[g.LabelKey("partition")]; g.CurrentPartition != subjPartition {
-		ctx.Log.Info("subject resides in a different controller partition",
-			"subjPartition", subjPartition,
-			"currentPartition", g.CurrentPartition)
+		// do not allow subsequent code to see this subject anywhere, even in ReconcileComplete.
+		// it is not ours to observe:
+		var nilS S
+		ctx.Subject = nilS
 		return nil, PartitionMismatch
 	}
 
