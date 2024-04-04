@@ -314,6 +314,8 @@ func (g *Reconciler[S, C]) reconcile(ctx *Context[S, C]) (error, ReconciliationS
 		return nil, PartitionMismatch
 	}
 
+	ctx.Log = ctx.Log.WithValues("subjectUID", ctx.Subject.GetUID())
+
 	if ctx.Subject.IsSuspended() {
 		ctx.Log.Info("subject is suspended")
 		return nil, SubjectSuspended
@@ -330,7 +332,6 @@ func (g *Reconciler[S, C]) reconcile(ctx *Context[S, C]) (error, ReconciliationS
 		}
 	}
 
-	ctx.Log.Info("reconciling live object")
 	origSubject := ctx.Subject.DeepCopyObject().(S) // copy the object now to compare it later
 
 	if err = g.Logic.FillDefaults(ctx); err != nil {
