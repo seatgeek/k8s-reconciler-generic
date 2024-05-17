@@ -367,7 +367,10 @@ func (g *Reconciler[S, C]) reconcile(ctx *Context[S, C]) (error, ReconciliationS
 	}
 
 	if !g.Logic.IsStatusEqual(origSubject, ctx.Subject) {
-		if err = g.Client.Status().Update(ctx, ctx.Subject); err != nil {
+		// If we do not deep copy the object before updating Status, this call overwrites the Spec in the
+		// referent, and we lose anything that was added in FillDefaults. Logic in ApplyUnmanaged, if any,
+		// should see the spec with defaults filled in!
+		if err = g.Client.Status().Update(ctx, ctx.Subject.DeepCopyObject().(S)); err != nil {
 			return err, UpdateStatusError
 		}
 	}
