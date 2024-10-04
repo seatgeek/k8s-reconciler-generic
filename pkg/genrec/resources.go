@@ -58,6 +58,8 @@ type Resource struct {
 	Object         client.Object
 	IsSensitive    bool
 	DeleteOnChange bool
+	//AdoptOrphan    bool
+	DoNothing bool
 	// Pass indicates whether the resource should be ignored for diffs
 	Pass bool
 }
@@ -67,6 +69,7 @@ func Observe[T client.Object](key, name string, observer func(string, *k8sutil.C
 	if err != nil {
 		return Resource{}, err
 	}
+	// TODO: should this ignorre resources without controllerref set to this?
 	return Resource{
 		Key:    key,
 		Object: obj,
@@ -198,14 +201,21 @@ func (rd ResourceDiff) Apply(ctx context.Context, sc k8sutil.SchemedClient, owne
 		return nil
 	}
 	log := logr.FromContextOrDiscard(ctx).WithValues("objOp", op, "obj", rd.logInfoMap(sc))
+
 	switch op {
 	case ResourceDiffOpUpdate:
+		if !rd.AdoptOrphan && !v1.IsControlledBy(rd.Observed, owner) {
+			log.Error(fmt.Errorf("controller reference missing from object"), "not updating object not owned by this controller")
+			return ErrDoNothing
+		}
+
 		if patchResult, err := om.DefaultPatchMaker.Calculate(rd.Observed, rd.Desired, calcOptions...); err != nil {
 			return err
 		} else if patchResult.IsEmpty() {
 			log.V(2).Info("object is up-to-date")
 			return nil
 		} else if rd.DeleteOnChange {
+
 			log.Info("deleting changed object")
 			return client.IgnoreNotFound(sc.Delete(ctx, rd.Observed, client.PropagationPolicy(v1.DeletePropagationBackground)))
 		} else {
@@ -237,6 +247,10 @@ func (rd ResourceDiff) Apply(ctx context.Context, sc k8sutil.SchemedClient, owne
 		}
 		return sc.Create(ctx, rd.Desired)
 	case ResourceDiffOpDelete:
+		if !rd.AdoptOrphan && !v1.IsControlledBy(rd.Observed, owner) {
+			log.Error(fmt.Errorf("object not owned by controller, adoption disabled"), "not deleting object not owned by this controller")
+			return ErrDoNothing
+		}
 		log.Info("deleting unwanted object")
 		return client.IgnoreNotFound(sc.Delete(ctx, rd.Observed, client.PropagationPolicy(v1.DeletePropagationBackground)))
 	default:

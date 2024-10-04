@@ -19,6 +19,7 @@ type ResourceHandler[C Context] struct {
 
 	IsSensitive    bool
 	DeleteOnChange bool
+	AdoptOrphan    bool
 }
 
 func NewHandler[T any, C Context, PT interface {
@@ -53,6 +54,11 @@ func (r ResourceHandler[C]) WithIsSensitive(v bool) ResourceHandler[C] {
 
 func (r ResourceHandler[C]) WithDeleteOnChange(v bool) ResourceHandler[C] {
 	r.DeleteOnChange = v
+	return r
+}
+
+func (r ResourceHandler[C]) WithAdoptOrphan(v bool) ResourceHandler[C] {
+	r.AdoptOrphan = v
 	return r
 }
 

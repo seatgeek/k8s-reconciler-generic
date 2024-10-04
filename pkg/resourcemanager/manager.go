@@ -7,10 +7,12 @@ import (
 	"github.com/seatgeek/k8s-reconciler-generic/pkg/genrec"
 	"github.com/seatgeek/k8s-reconciler-generic/pkg/k8sutil"
 	kmetav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
 // ResourceManager is a helper utility to make it easier to implement correct ObserveResources and GenerateResources
@@ -28,6 +30,8 @@ type Context interface {
 	GetClient() *k8sutil.ContextClient
 	ObjectName(tier, suffix string) string
 	ObjectMeta(tier, suffix string) kmetav1.ObjectMeta
+	GetExpectedOwnerReference() kmetav1.OwnerReference
+	GetSubject() genrec.Subject
 }
 
 // Only filters registered handlers by the tier, suffix provided
@@ -63,6 +67,19 @@ func (rm ResourceManager[C]) ObserveResources(c C) (genrec.Resources, error) {
 		if genrec.IsNil(rec.Object) {
 			continue
 		}
+
+		if !v1.IsControlledBy(rec.Object, c.GetSubject()) {
+			if kmetav1.GetControllerOf(rec.Object) != nil {
+				if r.IgnoreConflicts { // TODO whence?
+					rec.Pass = true // ????
+				} else {
+					return nil, errors.New("conflict with existing")
+				}
+			} else if !r.AdoptOrphan {
+				return nil, errors.New("conflict with orphan")
+			}
+		}
+
 		if rec.Key, err = r.resourceKey(objName, c); err != nil {
 			return nil, err
 		}

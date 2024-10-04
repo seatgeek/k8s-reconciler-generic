@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
+	"time"
+
 	"github.com/go-logr/logr"
 	"github.com/seatgeek/k8s-reconciler-generic/apiobjects"
 	"github.com/seatgeek/k8s-reconciler-generic/apiobjects/apiutils"
@@ -20,8 +23,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
-	"strings"
-	"time"
 )
 
 // Subject is an interface implemented by the class representing the CRD that is being reconciled.
@@ -174,6 +175,16 @@ func (c *Context[_, _]) ObjectMeta(tier, suffix string) kmetav1.ObjectMeta {
 		),
 		Annotations: c.Owner.Logic.ExtraAnnotationsForObject(c, tier, suffix),
 	}
+}
+
+func (c *Context[Subject, _]) GetSubject() Subject {
+	return c.Subject
+}
+
+// TODO: remove if unnecessary
+// GetExpectedOwnerReference returns the expected OwnerReference on an observed object
+func (c *Context[_, _]) GetExpectedOwnerReference() kmetav1.OwnerReference {
+	return *kmetav1.GetControllerOf(c.Subject)
 }
 
 func (c *Context[_, _]) ResolveSecretKeyRef(ref apiobjects.SecretKeyRef) (string, error) {
@@ -346,6 +357,7 @@ func (g *Reconciler[S, C]) reconcile(ctx *Context[S, C]) (error, ReconciliationS
 
 	var observedResources, desiredResources Resources
 
+	// TODO: pass in subject?? or extend context with GetSubject
 	if observedResources, err = g.Logic.ObserveResources(ctx); err != nil {
 		return err, ObserveResourcesError
 	}
@@ -386,6 +398,7 @@ func (g *Reconciler[S, C]) reconcile(ctx *Context[S, C]) (error, ReconciliationS
 	// you don't have to do anything other than return the correct observed / desired resources.
 
 	for _, rd := range resourceDiffs {
+		// TODO??? if !rd.AdoptOrphan && rd.Observed
 		// apply the diffs in order (the same order as returned by GenerateResources, with deletes prepended)
 		if err = rd.Apply(ctx, g.Client, ctx.Subject); err != nil {
 			return err, ApplyError
