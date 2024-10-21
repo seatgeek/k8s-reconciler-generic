@@ -62,7 +62,7 @@ type Logic[S Subject, C any] interface {
 	// can be removed from the subject. It must be idempotent.
 	Finalize(*Context[S, C]) error
 	// Validate checks the validity of the provided subject and prevents reconciliation if invalid.
-	// TODO we should wire this up through a ValidatingWebhookConfiguration to prevent pain.
+	// It is called in both the validating webhook AND during reconciliation as a preflight check.
 	Validate(S) error
 	// FillDefaults fills in default values into the subject's Spec. In theory this could be hooked up
 	// to a defaulting webhook BUT those are not very fun because it persists the defaults. So for now, this is
@@ -208,16 +208,25 @@ func (c *Context[_, _]) SetRequeue(after time.Duration) {
 	}
 }
 
-func (g *Reconciler[_, _]) SetupWithManager(mgr ctrl.Manager) error {
+func (g *Reconciler[S, C]) SetupWithManager(mgr ctrl.Manager) error {
 	cb := ctrl.NewControllerManagedBy(mgr)
-	cb.For(g.Logic.NewSubject(), builder.WithPredicates(predicate.Or(
+	subj := g.Logic.NewSubject()
+	cb.For(subj, builder.WithPredicates(predicate.Or(
 		predicate.GenerationChangedPredicate{},
 		predicate.AnnotationChangedPredicate{},
 	)))
 	if err := g.Logic.ConfigureController(cb, mgr); err != nil {
 		return err
 	}
-	return cb.Complete(g)
+	if err := cb.Complete(g); err != nil {
+		return err
+	}
+	wb := ctrl.NewWebhookManagedBy(mgr).For(subj).WithValidator(&validatingWebhookShim[S, C]{Logic: g.Logic})
+	if mwl, ok := g.Logic.(MutatingWebhookLogic[S, C]); ok {
+		// if your Logic implements MutatingWebhookLogic, we will hook it up:
+		wb = wb.WithDefaulter(&mutatingWebhookShim[S, C]{Reconciler: g, MutatingWebhookLogic: mwl})
+	}
+	return wb.Complete()
 }
 
 // the below are not really "errors", they are special values
@@ -226,9 +235,9 @@ func (g *Reconciler[_, _]) SetupWithManager(mgr ctrl.Manager) error {
 var ErrAbort = errors.New("abort reconciliation")
 var ErrRetry = errors.New("abort reconciliation with requeue")
 
-func (g *Reconciler[S, C]) Reconcile(ctx context.Context, request reconcile.Request) (reconcile.Result, error) {
+func (g *Reconciler[S, C]) newContext(ctx context.Context, nn types.NamespacedName) *Context[S, C] {
 	rctx := &Context[S, C]{
-		NamespacedName: request.NamespacedName,
+		NamespacedName: nn,
 		Context:        ctx,
 		Owner:          g,
 		Config:         g.Logic.GetConfig(),
@@ -238,12 +247,17 @@ func (g *Reconciler[S, C]) Reconcile(ctx context.Context, request reconcile.Requ
 		Client: &k8sutil.ContextClient{
 			SchemedClient: g.Client,
 			Context:       ctx,
-			Namespace:     request.Namespace,
+			Namespace:     nn.Namespace,
 		},
 	}
 	if rctx.EventRecorder == nil {
 		rctx.EventRecorder = &record.FakeRecorder{}
 	}
+	return rctx
+}
+
+func (g *Reconciler[S, C]) Reconcile(ctx context.Context, request reconcile.Request) (reconcile.Result, error) {
+	rctx := g.newContext(ctx, request.NamespacedName)
 
 	err, terminalState := g.reconcile(rctx)
 	g.Logic.ReconcileComplete(rctx, terminalState, err)
