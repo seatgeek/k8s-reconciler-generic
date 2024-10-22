@@ -50,10 +50,12 @@ func (m *mutatingWebhookShim[S, C]) Default(ctx context.Context, obj runtime.Obj
 	if !ok {
 		return fmt.Errorf("mutating webhook: expected a %T but got a %T", m.Logic.NewSubject(), subj)
 	}
-	return m.MutatingWebhookLogic.Mutate(m.newContext(ctx, types.NamespacedName{
+	rctx := m.newContext(ctx, types.NamespacedName{
 		Namespace: subj.GetNamespace(),
 		Name:      subj.GetName(),
-	}), req)
+	})
+	rctx.Subject = subj // in your Mutate method, you transform this object in-place
+	return m.MutatingWebhookLogic.Mutate(rctx, req)
 }
 
 type MutatingWebhookLogic[S Subject, C any] interface {
