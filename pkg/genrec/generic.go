@@ -116,6 +116,14 @@ func (c *Context[_, C]) GetConfig() C {
 	return c.Config
 }
 
+func (c *Context[_, _]) GetSubjectNamespace() string {
+	return c.Namespace
+}
+
+func (c *Context[_, _]) GetSubjectUID() types.UID {
+	return c.Subject.GetUID()
+}
+
 func (c *Context[_, _]) GetClient() *k8sutil.ContextClient {
 	return c.Client
 }

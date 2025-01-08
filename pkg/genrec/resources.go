@@ -51,15 +51,21 @@ func (r *Resources) Append(res Resources, err error) error {
 	return nil
 }
 
+type ResourceOpts struct {
+	IsSensitive    bool
+	DeleteOnChange bool
+	Orphan         bool
+}
+
 type Resource struct {
 	// Key is a unique name assigned to this resource inside the controller flow for tracking and diffing it
 	Key string
 	// Object is the actual object instance, should never be nil (do not return a Resource at all for a nil object)
-	Object         client.Object
-	IsSensitive    bool
-	DeleteOnChange bool
-	// Pass indicates whether the resource should be ignored for diffs
+	Object client.Object
+	// Pass indicates whether the resource should be ignored for diffs, it is set when ErrDoNothing is returned from a generator.
 	Pass bool
+	// ResourceOpts holds options controlling reconciliation behavior for this resource
+	ResourceOpts
 }
 
 func Observe[T client.Object](key, name string, observer func(string, *k8sutil.ContextClient) (T, error), f *k8sutil.ContextClient) (Resource, error) {
@@ -74,12 +80,11 @@ func Observe[T client.Object](key, name string, observer func(string, *k8sutil.C
 }
 
 type ResourceDiff struct {
-	Key            string
-	Observed       client.Object
-	Desired        client.Object
-	IsSensitive    bool
-	DeleteOnChange bool
-	Pass           bool
+	Key      string
+	Observed client.Object
+	Desired  client.Object
+	Pass     bool
+	ResourceOpts
 }
 
 type ResourceDiffOp string
@@ -151,11 +156,10 @@ func DiffResources(observed, desired Resources) ResourceDiffs {
 
 	for _, des := range desired {
 		rd := ResourceDiff{
-			Key:            des.Key,
-			Desired:        des.Object,
-			IsSensitive:    des.IsSensitive,
-			DeleteOnChange: des.DeleteOnChange,
-			Pass:           des.Pass,
+			Key:          des.Key,
+			Desired:      des.Object,
+			Pass:         des.Pass,
+			ResourceOpts: des.ResourceOpts,
 		}
 		if obs := obsMap[des.Key]; obs != nil {
 			rd.Observed = obs.Object
@@ -217,7 +221,7 @@ func (rd ResourceDiff) Apply(ctx context.Context, sc k8sutil.SchemedClient, owne
 			if err = om.DefaultAnnotator.SetLastAppliedAnnotation(rd.Desired); err != nil {
 				return err
 			}
-			if owner != nil {
+			if owner != nil && !rd.Orphan {
 				if err = ctrl.SetControllerReference(owner, rd.Desired, sc.Scheme); err != nil {
 					return err
 				}
@@ -230,7 +234,7 @@ func (rd ResourceDiff) Apply(ctx context.Context, sc k8sutil.SchemedClient, owne
 		if err := om.DefaultAnnotator.SetLastAppliedAnnotation(rd.Desired); err != nil {
 			return err
 		}
-		if owner != nil {
+		if owner != nil && !rd.Orphan {
 			if err := ctrl.SetControllerReference(owner, rd.Desired, sc.Scheme); err != nil {
 				return err
 			}

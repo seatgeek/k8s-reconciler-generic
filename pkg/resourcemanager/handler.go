@@ -2,6 +2,7 @@ package resourcemanager
 
 import (
 	"fmt"
+	"github.com/seatgeek/k8s-reconciler-generic/pkg/genrec"
 	"github.com/seatgeek/k8s-reconciler-generic/pkg/k8sutil"
 	kmetav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -17,19 +18,69 @@ type ResourceHandler[C Context] struct {
 	Observe  Observe[C, client.Object]
 	Generate Generate[C, client.Object]
 
-	IsSensitive    bool
-	DeleteOnChange bool
+	HandlerOpts[C]
+}
+
+type HandlerOpts[C Context] struct {
+	Requirements  []func(C) bool
+	ClusterScoped NameMapper[C]
+	genrec.ResourceOpts
+}
+
+type NameMapper[C Context] func(context C, name string) string
+
+func PrependNamespace[C Context](context C, name string) string {
+	return fmt.Sprintf("%s-%s", context.GetSubjectNamespace(), name)
+}
+
+func AppendUID[C Context](context C, name string) string {
+	return fmt.Sprintf("%s-%v", name, context.GetSubjectUID())
+}
+
+type OptsFunc[C Context] func(*HandlerOpts[C])
+
+func Sensitive[C Context](opts *HandlerOpts[C]) {
+	opts.IsSensitive = true
+}
+
+func DeleteOnChange[C Context](opts *HandlerOpts[C]) {
+	opts.DeleteOnChange = true
+}
+
+func Orphan[C Context](opts *HandlerOpts[C]) {
+	opts.Orphan = true
+}
+
+func ClusterScoped[C Context](mapper NameMapper[C]) OptsFunc[C] {
+	return func(opts *HandlerOpts[C]) {
+		opts.Orphan = true
+		opts.ClusterScoped = mapper
+	}
+}
+
+func Requires[C Context](predicate func(C) bool) OptsFunc[C] {
+	return func(opts *HandlerOpts[C]) {
+		opts.Requirements = append(opts.Requirements, predicate)
+	}
 }
 
 func NewHandler[T any, C Context, PT interface {
 	*T
 	client.Object
-}](tier, suffix string, generator Generate[C, PT]) ResourceHandler[C] {
+}](tier, suffix string, generator Generate[C, PT], ofs ...OptsFunc[C]) ResourceHandler[C] {
+	var opts HandlerOpts[C]
+	for _, of := range ofs {
+		of(&opts)
+	}
+
 	newT := func() PT { return (PT)(new(T)) }
 	var obsResolved Observe[C, client.Object]
 
 	// we can implement Observe for you.
 	obsResolved = func(name string, context C) (client.Object, error) {
+		if opts.ClusterScoped != nil {
+			name = opts.ClusterScoped(context, name)
+		}
 		return k8sutil.FetchInto(newT, name, context.GetClient())
 	}
 
@@ -41,19 +92,19 @@ func NewHandler[T any, C Context, PT interface {
 		GetGK:   makeGroupKindResolver(example),
 		Observe: obsResolved,
 		Generate: func(om kmetav1.ObjectMeta, context C) (client.Object, error) {
+			for _, requirement := range opts.Requirements {
+				if !requirement(context) {
+					return nil, nil
+				}
+			}
+			if opts.ClusterScoped != nil {
+				om.Name = opts.ClusterScoped(context, om.Name)
+				om.Namespace = ""
+			}
 			return generator(om, context)
 		},
+		HandlerOpts: opts,
 	}
-}
-
-func (r ResourceHandler[C]) WithIsSensitive(v bool) ResourceHandler[C] {
-	r.IsSensitive = v
-	return r
-}
-
-func (r ResourceHandler[C]) WithDeleteOnChange(v bool) ResourceHandler[C] {
-	r.DeleteOnChange = v
-	return r
 }
 
 func (r ResourceHandler[C]) resourceKey(objName string, c C) (string, error) {

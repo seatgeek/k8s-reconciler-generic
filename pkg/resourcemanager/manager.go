@@ -2,6 +2,7 @@ package resourcemanager
 
 import (
 	"errors"
+	"k8s.io/apimachinery/pkg/types"
 	"reflect"
 
 	"github.com/seatgeek/k8s-reconciler-generic/pkg/genrec"
@@ -25,6 +26,8 @@ import (
 type ResourceManager[C Context] []ResourceHandler[C]
 
 type Context interface {
+	GetSubjectNamespace() string
+	GetSubjectUID() types.UID
 	GetClient() *k8sutil.ContextClient
 	ObjectName(tier, suffix string) string
 	ObjectMeta(tier, suffix string) kmetav1.ObjectMeta
@@ -53,10 +56,7 @@ func (rm ResourceManager[C]) ObserveResources(c C) (genrec.Resources, error) {
 	res := make(genrec.Resources, 0, len(rm))
 	for _, r := range rm {
 		objName := c.ObjectName(r.Tier, r.Suffix)
-		rec := genrec.Resource{
-			IsSensitive:    r.IsSensitive,
-			DeleteOnChange: r.DeleteOnChange,
-		}
+		rec := genrec.Resource{ResourceOpts: r.ResourceOpts}
 		if rec.Object, err = r.Observe(objName, c); err != nil {
 			return nil, err
 		}
@@ -90,15 +90,12 @@ func (rm ResourceManager[C]) GenerateResources(c C) (genrec.Resources, error) {
 	res := make(genrec.Resources, 0, len(rm))
 	for _, r := range rm {
 		objMeta := c.ObjectMeta(r.Tier, r.Suffix)
-		rec := genrec.Resource{
-			IsSensitive:    r.IsSensitive,
-			DeleteOnChange: r.DeleteOnChange,
-		}
+		rec := genrec.Resource{ResourceOpts: r.ResourceOpts}
 		if rec.Key, err = r.resourceKey(objMeta.Name, c); err != nil {
 			return nil, err
 		}
 		if rec.Object, err = r.Generate(objMeta, c); err != nil {
-			if err == genrec.ErrDoNothing {
+			if errors.Is(err, genrec.ErrDoNothing) {
 				rec.Pass = true
 			} else {
 				return nil, err
@@ -130,18 +127,6 @@ func (rm ResourceManager[C]) UniqueExamplesByType() []client.Object {
 type Pred[C Context] func(C) bool
 type Observe[C Context, T client.Object] func(name string, context C) (T, error)
 type Generate[C Context, T client.Object] func(om kmetav1.ObjectMeta, context C) (T, error)
-
-// GenIf takes a generator and returns a new generator that returns nil, nil when the predicate returns false, and the
-// value of the provided generator when the predicate returns true.
-func GenIf[C Context, T client.Object](p Pred[C], g Generate[C, T]) Generate[C, T] {
-	return func(om kmetav1.ObjectMeta, context C) (T, error) {
-		if !p(context) {
-			var t T
-			return t, nil
-		}
-		return g(om, context)
-	}
-}
 
 type GroupKindResolver func(sch *runtime.Scheme) (schema.GroupKind, error)
 
