@@ -3,6 +3,7 @@ package genrec
 import (
 	"context"
 	"fmt"
+	ktypes "k8s.io/apimachinery/pkg/types"
 	"reflect"
 	"strings"
 
@@ -55,6 +56,7 @@ type ResourceOpts struct {
 	IsSensitive    bool
 	DeleteOnChange bool
 	Orphan         bool
+	PatchUpdates   bool
 }
 
 type Resource struct {
@@ -195,6 +197,18 @@ var calcOptions = []om.CalculateOption{
 	ignorePDBSelector,
 }
 
+type patchShim struct {
+	Result *om.PatchResult
+}
+
+func (s patchShim) Type() ktypes.PatchType {
+	return ktypes.MergePatchType
+}
+
+func (s patchShim) Data(_ client.Object) ([]byte, error) {
+	return s.Result.Patch, nil
+}
+
 func (rd ResourceDiff) Apply(ctx context.Context, sc k8sutil.SchemedClient, owner client.Object) error {
 	op := rd.Op()
 	if op == ResourceDiffOpNone {
@@ -220,6 +234,14 @@ func (rd ResourceDiff) Apply(ctx context.Context, sc k8sutil.SchemedClient, owne
 			}
 			if err = om.DefaultAnnotator.SetLastAppliedAnnotation(rd.Desired); err != nil {
 				return err
+			}
+			if rd.PatchUpdates {
+				// need to make sure the last-applied annot is IN the patch so we have to do it again:
+				patchResult, err = om.DefaultPatchMaker.Calculate(rd.Observed, rd.Desired, calcOptions...)
+				if err != nil {
+					return err
+				}
+				return sc.Patch(ctx, rd.Observed, patchShim{Result: patchResult})
 			}
 			if owner != nil && !rd.Orphan {
 				if err = ctrl.SetControllerReference(owner, rd.Desired, sc.Scheme); err != nil {

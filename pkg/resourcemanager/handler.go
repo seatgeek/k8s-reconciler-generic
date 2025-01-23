@@ -47,6 +47,10 @@ func DeleteOnChange[C Context](opts *HandlerOpts[C]) {
 	opts.DeleteOnChange = true
 }
 
+func PatchUpdates[C Context](opts *HandlerOpts[C]) {
+	opts.PatchUpdates = true
+}
+
 func Orphan[C Context](opts *HandlerOpts[C]) {
 	opts.Orphan = true
 }
