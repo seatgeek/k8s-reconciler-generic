@@ -39,13 +39,6 @@ type Reconciler[S Subject, C any] struct {
 	CurrentPartition string
 }
 
-type FinalizationMode string
-
-const (
-	FinalizeImmediately              FinalizationMode = "Immediately"
-	FinalizeAfterSuccessfulReconcile FinalizationMode = "AfterSuccessfulReconcile"
-)
-
 // Logic is a bundle of methods that define the actual behavior of the generic reconciliation process
 // when attached to some concrete CRD type.
 type Logic[S Subject, C any] interface {
@@ -67,7 +60,7 @@ type Logic[S Subject, C any] interface {
 	FinalizerKey() string
 	// Finalize is called at least once when a subject is deleted, and must succeed before the finalizer key
 	// can be removed from the subject. It must be idempotent.
-	Finalize(*Context[S, C]) (FinalizationMode, error)
+	Finalize(*Context[S, C]) (FinalizationAction, error)
 	// Validate checks the validity of the provided subject and prevents reconciliation if invalid.
 	// It is called in both the validating webhook AND during reconciliation as a preflight check.
 	Validate(S) error
@@ -443,8 +436,15 @@ func (g *Reconciler[S, C]) reconcile(ctx *Context[S, C]) (error, ReconciliationS
 type FinalizationAction string
 
 const (
-	FinalizationActionNone  FinalizationAction = ""
+	// Ignore finalization. we will try again on subsequent reconciles, but will continue reconciling as normal. Return
+	// this if some real constraint prevents finalization right now, but you need to continue to manage child objects.
+	// This indicates an object was deleted before it was in an okay state to be deleted, and the state needs to be
+	// changed for the deletion to proceed.
+	FinalizationActionNone FinalizationAction = ""
+	// Abort reconciliation, finalizing immediately if necessary. You're ready to get cleaned up.
 	FinalizationActionAbort FinalizationAction = "Abort"
+	// Ignore finalization until after a complete, successful reconciliation. You can use this to have one pass to
+	// prepare child objects for deletion
 	FinalizationActionDefer FinalizationAction = "Defer"
 )
 
@@ -461,12 +461,15 @@ func (g *Reconciler[S, C]) manageFinalizers(ctx *Context[S, C], fk string) (Fina
 			return FinalizationActionAbort, err, FinalizationError
 		}
 		switch mode {
-		case FinalizeImmediately:
+		case FinalizationActionAbort:
 			ctx.SetRequeue(0)
 			ctx.Log.Info("subject was finalized", "finalizer", fk)
 			controllerutil.RemoveFinalizer(ctx.Subject, fk)
 			return FinalizationActionAbort, g.Client.Update(ctx, ctx.Subject), FinalizersChanged
-		case FinalizeAfterSuccessfulReconcile:
+		case FinalizationActionNone:
+			ctx.Log.Info("ignoring subject finalization, not ready", "finalizer", fk)
+			return FinalizationActionNone, nil, Okay
+		case FinalizationActionDefer:
 			ctx.Log.Info("subject will be finalized after successful reconcile", "finalizer", fk)
 			return FinalizationActionDefer, nil, Okay
 		}
