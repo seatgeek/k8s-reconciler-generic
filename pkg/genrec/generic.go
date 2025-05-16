@@ -48,7 +48,7 @@ type Logic[S Subject, C any] interface {
 	// environmental data into the Context, so that it can be used in generators. Where the type S designates the CRD
 	// itself, the type C is an ancillary data payload, you can put any struct there with any fields useful to
 	// reconciliation.
-	GetConfig() C
+	GetConfig(nn types.NamespacedName) C
 	// IsSubjectNil checks if a particular instance of the subject type is nil.
 	IsSubjectNil(S) bool
 	// IsStatusEqual compares the statuses of the given subjects and checks if they're the same.
@@ -248,7 +248,7 @@ func (g *Reconciler[S, C]) newContext(ctx context.Context, nn types.NamespacedNa
 		NamespacedName: nn,
 		Context:        ctx,
 		Owner:          g,
-		Config:         g.Logic.GetConfig(),
+		Config:         g.Logic.GetConfig(nn),
 		EventRecorder:  g.Recorder,
 		Log:            log.FromContext(ctx),
 		Started:        time.Now(),
@@ -439,7 +439,8 @@ func (g *Reconciler[S, C]) manageFinalizers(ctx *Context[S, C], fk string) (bool
 		// Subject IS NOT logically deleted and needs finalizer added
 		ctx.Log.Info("subject is live but missing finalizer key, adding", "finalizer", fk)
 		controllerutil.AddFinalizer(ctx.Subject, fk)
-		return true, g.Client.Update(ctx, ctx.Subject), FinalizersChanged
+		ctx.SetRequeue(0)
+		return FinalizeActionNone, g.Client.Update(ctx, ctx.Subject), FinalizersChanged
 	}
 	return false, nil, Okay
 }
