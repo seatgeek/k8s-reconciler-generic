@@ -39,6 +39,13 @@ type Reconciler[S Subject, C any] struct {
 	CurrentPartition string
 }
 
+type FinalizationMode string
+
+const (
+	FinalizeImmediately              FinalizationMode = "Immediately"
+	FinalizeAfterSuccessfulReconcile FinalizationMode = "AfterSuccessfulReconcile"
+)
+
 // Logic is a bundle of methods that define the actual behavior of the generic reconciliation process
 // when attached to some concrete CRD type.
 type Logic[S Subject, C any] interface {
@@ -60,7 +67,7 @@ type Logic[S Subject, C any] interface {
 	FinalizerKey() string
 	// Finalize is called at least once when a subject is deleted, and must succeed before the finalizer key
 	// can be removed from the subject. It must be idempotent.
-	Finalize(*Context[S, C]) error
+	Finalize(*Context[S, C]) (FinalizationMode, error)
 	// Validate checks the validity of the provided subject and prevents reconciliation if invalid.
 	// It is called in both the validating webhook AND during reconciliation as a preflight check.
 	Validate(S) error
@@ -348,9 +355,14 @@ func (g *Reconciler[S, C]) reconcile(ctx *Context[S, C]) (error, ReconciliationS
 		return err, SubjectInvalid
 	}
 
-	if fk := g.Logic.FinalizerKey(); fk != "" {
-		if abortReconciliation, err, rs := g.manageFinalizers(ctx, fk); err != nil || abortReconciliation {
+	var deferredFinalization bool
+	finalizerKey := g.Logic.FinalizerKey()
+	if finalizerKey != "" {
+		action, err, rs := g.manageFinalizers(ctx, finalizerKey)
+		if err != nil || action == FinalizationActionAbort {
 			return err, rs
+		} else if action == FinalizationActionDefer {
+			deferredFinalization = true
 		}
 	}
 
@@ -418,31 +430,54 @@ func (g *Reconciler[S, C]) reconcile(ctx *Context[S, C]) (error, ReconciliationS
 		return err, ApplyError
 	}
 
+	if deferredFinalization && finalizerKey != "" {
+		ctx.Log.Info("subject is being finalized after successful reconcile", "finalizer", finalizerKey)
+		ctx.SetRequeue(0)
+		controllerutil.RemoveFinalizer(ctx.Subject, finalizerKey)
+		return g.Client.Update(ctx, ctx.Subject), FinalizersChanged
+	}
+
 	return nil, Okay
 }
 
-func (g *Reconciler[S, C]) manageFinalizers(ctx *Context[S, C], fk string) (bool, error, ReconciliationStatus) {
+type FinalizationAction string
+
+const (
+	FinalizationActionNone  FinalizationAction = ""
+	FinalizationActionAbort FinalizationAction = "Abort"
+	FinalizationActionDefer FinalizationAction = "Defer"
+)
+
+func (g *Reconciler[S, C]) manageFinalizers(ctx *Context[S, C], fk string) (FinalizationAction, error, ReconciliationStatus) {
 	hasOurFinalizer := controllerutil.ContainsFinalizer(ctx.Subject, fk)
 	if ds := ctx.Subject.GetDeletionTimestamp(); !ds.IsZero() {
 		ctx.Log.Info("subject is logically deleted", "deletionTimestamp", ds)
 		if !hasOurFinalizer {
-			return true, nil, AlreadyFinalized // we already finalized it
+			return FinalizationActionAbort, nil, AlreadyFinalized // we already finalized it
 		}
 		ctx.Log.Info("subject needs finalization", "finalizer", fk)
-		if err := g.Logic.Finalize(ctx); err != nil {
-			return true, err, FinalizationError
+		mode, err := g.Logic.Finalize(ctx)
+		if err != nil {
+			return FinalizationActionAbort, err, FinalizationError
 		}
-		ctx.Log.Info("subject was finalized", "finalizer", fk)
-		controllerutil.RemoveFinalizer(ctx.Subject, fk)
-		return true, g.Client.Update(ctx, ctx.Subject), FinalizersChanged
+		switch mode {
+		case FinalizeImmediately:
+			ctx.SetRequeue(0)
+			ctx.Log.Info("subject was finalized", "finalizer", fk)
+			controllerutil.RemoveFinalizer(ctx.Subject, fk)
+			return FinalizationActionAbort, g.Client.Update(ctx, ctx.Subject), FinalizersChanged
+		case FinalizeAfterSuccessfulReconcile:
+			ctx.Log.Info("subject will be finalized after successful reconcile", "finalizer", fk)
+			return FinalizationActionDefer, nil, Okay
+		}
 	} else if !hasOurFinalizer {
 		// Subject IS NOT logically deleted and needs finalizer added
 		ctx.Log.Info("subject is live but missing finalizer key, adding", "finalizer", fk)
 		controllerutil.AddFinalizer(ctx.Subject, fk)
 		ctx.SetRequeue(0)
-		return FinalizeActionNone, g.Client.Update(ctx, ctx.Subject), FinalizersChanged
+		return FinalizationActionAbort, g.Client.Update(ctx, ctx.Subject), FinalizersChanged
 	}
-	return false, nil, Okay
+	return FinalizationActionNone, nil, Okay
 }
 
 func (g *Reconciler[_, _]) LabelKey(s string) string {
