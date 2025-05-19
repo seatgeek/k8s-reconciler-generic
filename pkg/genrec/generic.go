@@ -110,6 +110,7 @@ type Context[S Subject, C any] struct {
 	Started      time.Time
 	Client       *k8sutil.ContextClient
 	RequeueAfter *time.Duration
+	Finalization FinalizationAction
 }
 
 func (c *Context[_, C]) GetConfig() C {
@@ -126,6 +127,10 @@ func (c *Context[_, _]) GetSubjectUID() types.UID {
 
 func (c *Context[_, _]) GetClient() *k8sutil.ContextClient {
 	return c.Client
+}
+
+func (c *Context[_, _]) IsFinalizing() bool {
+	return c.Finalization != ""
 }
 
 func (c *Context[_, _]) ObjectName(tier, suffix string) string {
@@ -348,14 +353,13 @@ func (g *Reconciler[S, C]) reconcile(ctx *Context[S, C]) (error, ReconciliationS
 		return err, SubjectInvalid
 	}
 
-	var deferredFinalization bool
-	finalizerKey := g.Logic.FinalizerKey()
-	if finalizerKey != "" {
-		action, err, rs := g.manageFinalizers(ctx, finalizerKey)
-		if err != nil || action == FinalizationActionAbort {
+	if finalizerKey := g.Logic.FinalizerKey(); finalizerKey != "" {
+		if action, err, rs := g.manageFinalizers(ctx, finalizerKey); err != nil {
 			return err, rs
-		} else if action == FinalizationActionDefer {
-			deferredFinalization = true
+		} else if action == FinalizationCompleted {
+			return nil, rs
+		} else if action != "" {
+			ctx.Finalization = action
 		}
 	}
 
@@ -423,10 +427,10 @@ func (g *Reconciler[S, C]) reconcile(ctx *Context[S, C]) (error, ReconciliationS
 		return err, ApplyError
 	}
 
-	if deferredFinalization && finalizerKey != "" {
-		ctx.Log.Info("subject is being finalized after successful reconcile", "finalizer", finalizerKey)
+	if ctx.Finalization == FinalizeAfterReconciliation {
+		ctx.Log.Info("subject is being finalized after successful reconcile")
 		ctx.SetRequeue(0)
-		controllerutil.RemoveFinalizer(ctx.Subject, finalizerKey)
+		controllerutil.RemoveFinalizer(ctx.Subject, g.Logic.FinalizerKey())
 		return g.Client.Update(ctx, ctx.Subject), FinalizersChanged
 	}
 
@@ -436,16 +440,20 @@ func (g *Reconciler[S, C]) reconcile(ctx *Context[S, C]) (error, ReconciliationS
 type FinalizationAction string
 
 const (
-	// Ignore finalization. we will try again on subsequent reconciles, but will continue reconciling as normal. Return
-	// this if some real constraint prevents finalization right now, but you need to continue to manage child objects.
-	// This indicates an object was deleted before it was in an okay state to be deleted, and the state needs to be
-	// changed for the deletion to proceed.
-	FinalizationActionNone FinalizationAction = ""
-	// Abort reconciliation, finalizing immediately if necessary. You're ready to get cleaned up.
-	FinalizationActionAbort FinalizationAction = "Abort"
-	// Ignore finalization until after a complete, successful reconciliation. You can use this to have one pass to
-	// prepare child objects for deletion
-	FinalizationActionDefer FinalizationAction = "Defer"
+	// FinalizationImpossible means that the object or system state prevents object finalization right now. You
+	// should always record an event in this state, to give a hint to callers what they need to do to unblock
+	// deletion. When finalization is ignored, it means the object is trying to be deleted, but we'll continue
+	// reconciling as usual. Every subsequent reconciliation, the Finalize() method will be called again,
+	// and can continue returning FinalizationImpossible for as long as needed.
+	FinalizationImpossible FinalizationAction = "Impossible"
+	// FinalizationCompleted should be returned when the object can be deleted immediately. Reconciliation
+	// will be aborted, the finalizer removed, no generators will run, and k8s will start to collect the object and its
+	// descendents.
+	FinalizationCompleted FinalizationAction = "Completed"
+	// FinalizeAfterReconciliation indicates that we should remove the finalizer _after_ reconciling all child objects
+	// successfully one last time. If any generator is unsuccessful, this will behave like FinalizationImpossible until
+	// the next loop, where it can try again.
+	FinalizeAfterReconciliation FinalizationAction = "AfterReconciliation"
 )
 
 func (g *Reconciler[S, C]) manageFinalizers(ctx *Context[S, C], fk string) (FinalizationAction, error, ReconciliationStatus) {
@@ -453,34 +461,31 @@ func (g *Reconciler[S, C]) manageFinalizers(ctx *Context[S, C], fk string) (Fina
 	if ds := ctx.Subject.GetDeletionTimestamp(); !ds.IsZero() {
 		ctx.Log.Info("subject is logically deleted", "deletionTimestamp", ds)
 		if !hasOurFinalizer {
-			return FinalizationActionAbort, nil, AlreadyFinalized // we already finalized it
+			return FinalizationCompleted, nil, AlreadyFinalized // we already finalized it
 		}
-		ctx.Log.Info("subject needs finalization", "finalizer", fk)
 		mode, err := g.Logic.Finalize(ctx)
 		if err != nil {
-			return FinalizationActionAbort, err, FinalizationError
+			return "", err, FinalizationError
 		}
-		switch mode {
-		case FinalizationActionAbort:
+
+		ctx.Log.Info("handling finalization this reconcile", "action", mode)
+		if mode == FinalizationCompleted {
 			ctx.SetRequeue(0)
 			ctx.Log.Info("subject was finalized", "finalizer", fk)
 			controllerutil.RemoveFinalizer(ctx.Subject, fk)
-			return FinalizationActionAbort, g.Client.Update(ctx, ctx.Subject), FinalizersChanged
-		case FinalizationActionNone:
-			ctx.Log.Info("ignoring subject finalization, not ready", "finalizer", fk)
-			return FinalizationActionNone, nil, Okay
-		case FinalizationActionDefer:
-			ctx.Log.Info("subject will be finalized after successful reconcile", "finalizer", fk)
-			return FinalizationActionDefer, nil, Okay
+			return FinalizationCompleted, g.Client.Update(ctx, ctx.Subject), FinalizersChanged
 		}
+		
+		return mode, nil, Okay
 	} else if !hasOurFinalizer {
 		// Subject IS NOT logically deleted and needs finalizer added
 		ctx.Log.Info("subject is live but missing finalizer key, adding", "finalizer", fk)
 		controllerutil.AddFinalizer(ctx.Subject, fk)
 		ctx.SetRequeue(0)
-		return FinalizationActionAbort, g.Client.Update(ctx, ctx.Subject), FinalizersChanged
+		// we return FinalizationCompleted to abort reconciliation and retry with the finalizer added
+		return FinalizationCompleted, g.Client.Update(ctx, ctx.Subject), FinalizersChanged
 	}
-	return FinalizationActionNone, nil, Okay
+	return "", nil, Okay
 }
 
 func (g *Reconciler[_, _]) LabelKey(s string) string {
