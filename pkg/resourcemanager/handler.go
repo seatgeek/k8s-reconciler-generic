@@ -22,8 +22,9 @@ type ResourceHandler[C Context] struct {
 }
 
 type HandlerOpts[C Context] struct {
-	Requirements  []func(C) bool
-	ClusterScoped NameMapper[C]
+	Requirements    []func(C) bool
+	ClusterScoped   NameMapper[C]
+	ObserveCallback func(client.Object, C)
 	genrec.ResourceOpts
 }
 
@@ -38,6 +39,16 @@ func AppendUID[C Context](context C, name string) string {
 }
 
 type OptsFunc[C Context] func(*HandlerOpts[C])
+
+func ObserveCallback[C Context, T client.Object](cb func(T, C)) OptsFunc[C] {
+	return func(opts *HandlerOpts[C]) {
+		opts.ObserveCallback = func(object client.Object, c C) {
+			if t, ok := object.(T); ok {
+				cb(t, c)
+			}
+		}
+	}
+}
 
 func Sensitive[C Context](opts *HandlerOpts[C]) {
 	opts.IsSensitive = true
@@ -85,7 +96,14 @@ func NewHandler[T any, C Context, PT interface {
 		if opts.ClusterScoped != nil {
 			name = opts.ClusterScoped(context, name)
 		}
-		return k8sutil.FetchInto(newT, name, context.GetClient())
+		obj, err := k8sutil.FetchInto(newT, name, context.GetClient())
+		if err != nil {
+			return nil, err
+		}
+		if opts.ObserveCallback != nil {
+			opts.ObserveCallback(obj, context)
+		}
+		return obj, nil
 	}
 
 	example := client.Object(newT())
