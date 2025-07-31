@@ -177,7 +177,14 @@ func (rd ResourceDiffs) Issues(issuesFunc func(object client.Object) []string) [
 	for _, diff := range rd {
 		var facts []string
 		isObserved, isDesired := diff.IsObserved(), diff.IsDesired()
-		if isObserved && isDesired {
+		if diff.Pass {
+			// if we are passing, regardless of any diff, observed == desired. we can report higher-level issues with the
+			// observed state (e.g. an underreplicated deployment) but there are conceptually no issues relating to absence
+			// or presence of the object itself.
+			if isObserved {
+				facts = append(facts, issuesFunc(diff.Observed)...)
+			}
+		} else if isObserved && isDesired {
 			facts = append(facts, issuesFunc(diff.Observed)...)
 		} else if isObserved {
 			facts = append(facts, "unwanted")
