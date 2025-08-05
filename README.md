@@ -3,5 +3,5 @@
 This is a generic reconciler abstraction based on Kubebuilder and implementing the observe-generate-apply pattern
 via Golang generics, so you can focus on your resources instead of mechanics.
 
-Documentation forthcoming.
+[Documentation on pkg.go.dev](https://pkg.go.dev/github.com/seatgeek/k8s-reconciler-generic)
 
