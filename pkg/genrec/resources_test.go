@@ -2,8 +2,10 @@ package genrec
 
 import (
 	"context"
+	"encoding/base64"
 	"testing"
 
+	om "github.com/banzaicloud/k8s-objectmatcher/patch"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -13,31 +15,79 @@ import (
 	"github.com/seatgeek/k8s-reconciler-generic/pkg/k8sutil"
 )
 
-func TestResourceDiff_Apply_DeleteOnChange(t *testing.T) {
-	observed := &corev1.ConfigMap{
+// configMapWithCorruptLastAppliedAnnotation returns a ConfigMap whose
+// banzaicloud.com/last-applied annotation decodes to bytes that sniff as
+// application/zip but are not a valid zip, so patch.Calculate fails while
+// reading original configuration.
+func configMapWithCorruptLastAppliedAnnotation() *corev1.ConfigMap {
+	corruptZip := []byte{'P', 'K', 0x03, 0x04, 0x00, 0x00, 0x00}
+	return &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default",
+			Name:      "test-cm",
+			Annotations: map[string]string{
+				om.LastAppliedConfig: base64.StdEncoding.EncodeToString(corruptZip),
+			},
+		},
+		Data: map[string]string{"key": "observed"},
+	}
+}
+
+func TestResourceDiff_Apply_DeleteOnPatchCalculationError(t *testing.T) {
+	normalObserved := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: "default",
 			Name:      "test-cm",
 		},
 		Data: map[string]string{"key": "observed"},
 	}
-	desired := observed.DeepCopy()
-	desired.Data["key"] = "desired"
+	desiredDiffers := normalObserved.DeepCopy()
+	desiredDiffers.Data["key"] = "desired"
 
 	tests := []struct {
-		name           string
-		deleteOnChange bool
-		wantDelete     bool
+		name                          string
+		observed                      *corev1.ConfigMap
+		desired                       *corev1.ConfigMap
+		deleteOnPatchCalculationError bool
+		wantDelete                    bool
+		wantErr                       bool
+		wantKey                       string // Data["key"] when object still exists
 	}{
 		{
-			name:           "DeleteOnChange short-circuits before patch calculation",
-			deleteOnChange: true,
-			wantDelete:     true,
+			name:                          "deletes when patch calculation fails and opt is set",
+			observed:                      configMapWithCorruptLastAppliedAnnotation(),
+			desired:                       desiredDiffers.DeepCopy(),
+			deleteOnPatchCalculationError: true,
+			wantDelete:                    true,
+			wantErr:                       false,
+			wantKey:                       "",
 		},
 		{
-			name:           "without DeleteOnChange patch calculation runs for updates",
-			deleteOnChange: false,
-			wantDelete:     false,
+			name:                          "returns error when patch calculation fails and opt is unset",
+			observed:                      configMapWithCorruptLastAppliedAnnotation(),
+			desired:                       desiredDiffers.DeepCopy(),
+			deleteOnPatchCalculationError: false,
+			wantDelete:                    false,
+			wantErr:                       true,
+			wantKey:                       "observed",
+		},
+		{
+			name:                          "no-op when observed matches desired",
+			observed:                      normalObserved.DeepCopy(),
+			desired:                       normalObserved.DeepCopy(),
+			deleteOnPatchCalculationError: true,
+			wantDelete:                    false,
+			wantErr:                       false,
+			wantKey:                       "observed",
+		},
+		{
+			name:                          "applies update when patch calculation succeeds",
+			observed:                      normalObserved.DeepCopy(),
+			desired:                       desiredDiffers.DeepCopy(),
+			deleteOnPatchCalculationError: true,
+			wantDelete:                    false,
+			wantErr:                       false,
+			wantKey:                       "desired",
 		},
 	}
 
@@ -47,33 +97,39 @@ func TestResourceDiff_Apply_DeleteOnChange(t *testing.T) {
 			if err := corev1.AddToScheme(scheme); err != nil {
 				t.Fatalf("AddToScheme: %v", err)
 			}
-			cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(observed.DeepCopy()).Build()
+			cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(tt.observed.DeepCopy()).Build()
 			sc := k8sutil.SchemedClient{Client: cl, Scheme: scheme}
 
 			rd := ResourceDiff{
 				Key:          "cm",
-				Observed:     observed.DeepCopy(),
-				Desired:      desired.DeepCopy(),
-				ResourceOpts: ResourceOpts{DeleteOnChange: tt.deleteOnChange},
+				Observed:     tt.observed.DeepCopy(),
+				Desired:      tt.desired.DeepCopy(),
+				ResourceOpts: ResourceOpts{DeleteOnPatchCalculationError: tt.deleteOnPatchCalculationError},
 			}
 
-			if err := rd.Apply(context.Background(), sc, nil); err != nil {
+			err := rd.Apply(context.Background(), sc, nil)
+			if tt.wantErr && err == nil {
+				t.Fatal("expected Apply error")
+			}
+			if !tt.wantErr && err != nil {
 				t.Fatalf("Apply: %v", err)
 			}
 
 			var got corev1.ConfigMap
-			err := cl.Get(context.Background(), client.ObjectKeyFromObject(observed), &got)
-			stillExists := err == nil
-			if tt.wantDelete && stillExists {
-				t.Fatal("expected object to be deleted from the API when DeleteOnChange is set")
+			getErr := cl.Get(context.Background(), client.ObjectKeyFromObject(tt.observed), &got)
+			stillExists := getErr == nil
+
+			if tt.wantDelete {
+				if stillExists {
+					t.Fatal("expected object to be deleted after patch calculation error")
+				}
+				return
 			}
-			if !tt.wantDelete {
-				if !stillExists {
-					t.Fatal("expected object to remain when DeleteOnChange is false")
-				}
-				if got.Data["key"] != "desired" {
-					t.Fatalf("expected ConfigMap to be updated to desired data, got %q", got.Data["key"])
-				}
+			if !stillExists {
+				t.Fatal("expected object to remain")
+			}
+			if got.Data["key"] != tt.wantKey {
+				t.Fatalf("expected ConfigMap data key %q, got %q", tt.wantKey, got.Data["key"])
 			}
 		})
 	}
