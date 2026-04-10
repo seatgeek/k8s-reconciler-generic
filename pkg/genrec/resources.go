@@ -205,11 +205,6 @@ var calcOptions = []om.CalculateOption{
 	ignorePDBSelector,
 }
 
-// patchCalculate delegates to the default patch maker. Tests may replace it to assert call behavior.
-var patchCalculate = func(observed, desired client.Object, opts ...om.CalculateOption) (*om.PatchResult, error) {
-	return om.DefaultPatchMaker.Calculate(observed, desired, opts...)
-}
-
 type patchShim struct {
 	Result *om.PatchResult
 }
@@ -234,7 +229,7 @@ func (rd ResourceDiff) Apply(ctx context.Context, sc k8sutil.SchemedClient, owne
 		if rd.DeleteOnChange {
 			log.Info("deleting changed object")
 			return client.IgnoreNotFound(sc.Delete(ctx, rd.Observed, client.PropagationPolicy(v1.DeletePropagationBackground)))
-		} else if patchResult, err := patchCalculate(rd.Observed, rd.Desired, calcOptions...); err != nil {
+		} else if patchResult, err := om.DefaultPatchMaker.Calculate(rd.Observed, rd.Desired, calcOptions...); err != nil {
 			return err
 		} else if patchResult.IsEmpty() {
 			log.V(2).Info("object is up-to-date")
@@ -250,7 +245,7 @@ func (rd ResourceDiff) Apply(ctx context.Context, sc k8sutil.SchemedClient, owne
 			}
 			if rd.PatchUpdates {
 				// need to make sure the last-applied annot is IN the patch so we have to do it again:
-				patchResult, err = patchCalculate(rd.Observed, rd.Desired, calcOptions...)
+				patchResult, err = om.DefaultPatchMaker.Calculate(rd.Observed, rd.Desired, calcOptions...)
 				if err != nil {
 					return err
 				}
