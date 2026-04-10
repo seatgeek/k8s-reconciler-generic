@@ -2,7 +2,7 @@ package genrec
 
 import (
 	"context"
-	"fmt"
+	"encoding/base64"
 	"testing"
 
 	om "github.com/banzaicloud/k8s-objectmatcher/patch"
@@ -14,6 +14,24 @@ import (
 
 	"github.com/seatgeek/k8s-reconciler-generic/pkg/k8sutil"
 )
+
+// configMapWithCorruptLastAppliedAnnotation returns a ConfigMap whose
+// banzaicloud.com/last-applied annotation decodes to bytes that sniff as
+// application/zip but are not a valid zip, so patch.Calculate fails while
+// reading original configuration.
+func configMapWithCorruptLastAppliedAnnotation() *corev1.ConfigMap {
+	corruptZip := []byte{'P', 'K', 0x03, 0x04, 0x00, 0x00, 0x00}
+	return &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default",
+			Name:      "test-cm",
+			Annotations: map[string]string{
+				om.LastAppliedConfig: base64.StdEncoding.EncodeToString(corruptZip),
+			},
+		},
+		Data: map[string]string{"key": "observed"},
+	}
+}
 
 func TestResourceDiff_Apply_DeleteOnPatchCalculationError(t *testing.T) {
 	normalObserved := &corev1.ConfigMap{
@@ -28,7 +46,7 @@ func TestResourceDiff_Apply_DeleteOnPatchCalculationError(t *testing.T) {
 
 	tests := []struct {
 		name                          string
-		simulatePatchError            bool
+		observed                      *corev1.ConfigMap
 		desired                       *corev1.ConfigMap
 		deleteOnPatchCalculationError bool
 		wantDelete                    bool
@@ -37,7 +55,7 @@ func TestResourceDiff_Apply_DeleteOnPatchCalculationError(t *testing.T) {
 	}{
 		{
 			name:                          "deletes when patch calculation fails and opt is set",
-			simulatePatchError:            true,
+			observed:                      configMapWithCorruptLastAppliedAnnotation(),
 			desired:                       desiredDiffers.DeepCopy(),
 			deleteOnPatchCalculationError: true,
 			wantDelete:                    true,
@@ -46,7 +64,7 @@ func TestResourceDiff_Apply_DeleteOnPatchCalculationError(t *testing.T) {
 		},
 		{
 			name:                          "returns error when patch calculation fails and opt is unset",
-			simulatePatchError:            true,
+			observed:                      configMapWithCorruptLastAppliedAnnotation(),
 			desired:                       desiredDiffers.DeepCopy(),
 			deleteOnPatchCalculationError: false,
 			wantDelete:                    false,
@@ -55,7 +73,7 @@ func TestResourceDiff_Apply_DeleteOnPatchCalculationError(t *testing.T) {
 		},
 		{
 			name:                          "no-op when observed matches desired",
-			simulatePatchError:            false,
+			observed:                      normalObserved.DeepCopy(),
 			desired:                       normalObserved.DeepCopy(),
 			deleteOnPatchCalculationError: true,
 			wantDelete:                    false,
@@ -64,7 +82,7 @@ func TestResourceDiff_Apply_DeleteOnPatchCalculationError(t *testing.T) {
 		},
 		{
 			name:                          "applies update when patch calculation succeeds",
-			simulatePatchError:            false,
+			observed:                      normalObserved.DeepCopy(),
 			desired:                       desiredDiffers.DeepCopy(),
 			deleteOnPatchCalculationError: true,
 			wantDelete:                    false,
@@ -75,25 +93,16 @@ func TestResourceDiff_Apply_DeleteOnPatchCalculationError(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			orig := patchCalculate
-			if tt.simulatePatchError {
-				patchCalculate = func(_ runtime.Object, _ runtime.Object, _ ...om.CalculateOption) (*om.PatchResult, error) {
-					return nil, fmt.Errorf("simulated patch calculation error")
-				}
-			}
-			t.Cleanup(func() { patchCalculate = orig })
-
 			scheme := runtime.NewScheme()
 			if err := corev1.AddToScheme(scheme); err != nil {
 				t.Fatalf("AddToScheme: %v", err)
 			}
-			observed := normalObserved.DeepCopy()
-			cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(observed).Build()
+			cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(tt.observed.DeepCopy()).Build()
 			sc := k8sutil.SchemedClient{Client: cl, Scheme: scheme}
 
 			rd := ResourceDiff{
 				Key:          "cm",
-				Observed:     observed.DeepCopy(),
+				Observed:     tt.observed.DeepCopy(),
 				Desired:      tt.desired.DeepCopy(),
 				ResourceOpts: ResourceOpts{DeleteOnPatchCalculationError: tt.deleteOnPatchCalculationError},
 			}
@@ -107,7 +116,7 @@ func TestResourceDiff_Apply_DeleteOnPatchCalculationError(t *testing.T) {
 			}
 
 			var got corev1.ConfigMap
-			getErr := cl.Get(context.Background(), client.ObjectKeyFromObject(observed), &got)
+			getErr := cl.Get(context.Background(), client.ObjectKeyFromObject(tt.observed), &got)
 			stillExists := getErr == nil
 
 			if tt.wantDelete {

@@ -12,7 +12,6 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/seatgeek/k8s-reconciler-generic/pkg/k8sutil"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
@@ -209,11 +208,6 @@ var calcOptions = []om.CalculateOption{
 	ignorePDBSelector,
 }
 
-// patchCalculate is the objectmatcher diff used by Apply; tests may replace it to simulate failures.
-var patchCalculate = func(current, modified runtime.Object, opts ...om.CalculateOption) (*om.PatchResult, error) {
-	return om.DefaultPatchMaker.Calculate(current, modified, opts...)
-}
-
 type patchShim struct {
 	Result *om.PatchResult
 }
@@ -235,7 +229,7 @@ func (rd ResourceDiff) Apply(ctx context.Context, sc k8sutil.SchemedClient, owne
 	log := logr.FromContextOrDiscard(ctx).WithValues("objOp", op, "obj", rd.logInfoMap(sc))
 	switch op {
 	case ResourceDiffOpUpdate:
-		patchResult, err := patchCalculate(rd.Observed, rd.Desired, calcOptions...)
+		patchResult, err := om.DefaultPatchMaker.Calculate(rd.Observed, rd.Desired, calcOptions...)
 		if err != nil {
 			// delete objects where there is a diff calculation error
 			if rd.DeleteOnPatchCalculationError {
@@ -260,7 +254,7 @@ func (rd ResourceDiff) Apply(ctx context.Context, sc k8sutil.SchemedClient, owne
 			}
 			if rd.PatchUpdates {
 				// need to make sure the last-applied annot is IN the patch so we have to do it again:
-				patchResult, err = patchCalculate(rd.Observed, rd.Desired, calcOptions...)
+				patchResult, err = om.DefaultPatchMaker.Calculate(rd.Observed, rd.Desired, calcOptions...)
 				if err != nil {
 					return err
 				}
