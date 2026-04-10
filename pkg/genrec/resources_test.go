@@ -27,16 +27,25 @@ func TestResourceDiff_Apply_DeleteOnChange(t *testing.T) {
 	tests := []struct {
 		name           string
 		deleteOnChange bool
+		desired        *corev1.ConfigMap
 		wantDelete     bool
 	}{
 		{
-			name:           "DeleteOnChange short-circuits before patch calculation",
+			name:           "DeleteOnChange deletes only when patch is non-empty",
 			deleteOnChange: true,
+			desired:        desired.DeepCopy(),
 			wantDelete:     true,
 		},
 		{
-			name:           "without DeleteOnChange patch calculation runs for updates",
+			name:           "DeleteOnChange no-op when observed matches desired",
+			deleteOnChange: true,
+			desired:        observed.DeepCopy(),
+			wantDelete:     false,
+		},
+		{
+			name:           "without DeleteOnChange patch applies for updates",
 			deleteOnChange: false,
+			desired:        desired.DeepCopy(),
 			wantDelete:     false,
 		},
 	}
@@ -53,7 +62,7 @@ func TestResourceDiff_Apply_DeleteOnChange(t *testing.T) {
 			rd := ResourceDiff{
 				Key:          "cm",
 				Observed:     observed.DeepCopy(),
-				Desired:      desired.DeepCopy(),
+				Desired:      tt.desired.DeepCopy(),
 				ResourceOpts: ResourceOpts{DeleteOnChange: tt.deleteOnChange},
 			}
 
@@ -71,8 +80,8 @@ func TestResourceDiff_Apply_DeleteOnChange(t *testing.T) {
 				if !stillExists {
 					t.Fatal("expected object to remain when DeleteOnChange is false")
 				}
-				if got.Data["key"] != "desired" {
-					t.Fatalf("expected ConfigMap to be updated to desired data, got %q", got.Data["key"])
+				if got.Data["key"] != tt.desired.Data["key"] {
+					t.Fatalf("expected ConfigMap data to match desired, got %q want %q", got.Data["key"], tt.desired.Data["key"])
 				}
 			}
 		})
