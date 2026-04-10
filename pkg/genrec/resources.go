@@ -3,9 +3,10 @@ package genrec
 import (
 	"context"
 	"fmt"
-	ktypes "k8s.io/apimachinery/pkg/types"
 	"reflect"
 	"strings"
+
+	ktypes "k8s.io/apimachinery/pkg/types"
 
 	om "github.com/banzaicloud/k8s-objectmatcher/patch"
 	"github.com/go-logr/logr"
@@ -204,6 +205,11 @@ var calcOptions = []om.CalculateOption{
 	ignorePDBSelector,
 }
 
+// patchCalculate delegates to the default patch maker. Tests may replace it to assert call behavior.
+var patchCalculate = func(observed, desired client.Object, opts ...om.CalculateOption) (*om.PatchResult, error) {
+	return om.DefaultPatchMaker.Calculate(observed, desired, opts...)
+}
+
 type patchShim struct {
 	Result *om.PatchResult
 }
@@ -225,14 +231,14 @@ func (rd ResourceDiff) Apply(ctx context.Context, sc k8sutil.SchemedClient, owne
 	log := logr.FromContextOrDiscard(ctx).WithValues("objOp", op, "obj", rd.logInfoMap(sc))
 	switch op {
 	case ResourceDiffOpUpdate:
-		if patchResult, err := om.DefaultPatchMaker.Calculate(rd.Observed, rd.Desired, calcOptions...); err != nil {
+		if rd.DeleteOnChange {
+			log.Info("deleting changed object")
+			return client.IgnoreNotFound(sc.Delete(ctx, rd.Observed, client.PropagationPolicy(v1.DeletePropagationBackground)))
+		} else if patchResult, err := patchCalculate(rd.Observed, rd.Desired, calcOptions...); err != nil {
 			return err
 		} else if patchResult.IsEmpty() {
 			log.V(2).Info("object is up-to-date")
 			return nil
-		} else if rd.DeleteOnChange {
-			log.Info("deleting changed object")
-			return client.IgnoreNotFound(sc.Delete(ctx, rd.Observed, client.PropagationPolicy(v1.DeletePropagationBackground)))
 		} else {
 			if rd.IsSensitive {
 				log.Info("updating sensitive object; diff hidden")
@@ -244,7 +250,7 @@ func (rd ResourceDiff) Apply(ctx context.Context, sc k8sutil.SchemedClient, owne
 			}
 			if rd.PatchUpdates {
 				// need to make sure the last-applied annot is IN the patch so we have to do it again:
-				patchResult, err = om.DefaultPatchMaker.Calculate(rd.Observed, rd.Desired, calcOptions...)
+				patchResult, err = patchCalculate(rd.Observed, rd.Desired, calcOptions...)
 				if err != nil {
 					return err
 				}
