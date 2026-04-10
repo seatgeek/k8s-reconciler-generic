@@ -12,6 +12,7 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/seatgeek/k8s-reconciler-generic/pkg/k8sutil"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
@@ -56,8 +57,11 @@ func (r *Resources) Append(res Resources, err error) error {
 type ResourceOpts struct {
 	IsSensitive    bool
 	DeleteOnChange bool
-	Orphan         bool
-	PatchUpdates   bool
+	// Delete the object if the patch calculation fails.
+	// Useful in scenarios where an object cannot be patched due to the resource containing arbitrary JSON fields.
+	DeleteOnPatchCalculationError bool
+	Orphan                        bool
+	PatchUpdates                  bool
 }
 
 type Resource struct {
@@ -205,6 +209,11 @@ var calcOptions = []om.CalculateOption{
 	ignorePDBSelector,
 }
 
+// patchCalculate is the objectmatcher diff used by Apply; tests may replace it to simulate failures.
+var patchCalculate = func(current, modified runtime.Object, opts ...om.CalculateOption) (*om.PatchResult, error) {
+	return om.DefaultPatchMaker.Calculate(current, modified, opts...)
+}
+
 type patchShim struct {
 	Result *om.PatchResult
 }
@@ -226,10 +235,11 @@ func (rd ResourceDiff) Apply(ctx context.Context, sc k8sutil.SchemedClient, owne
 	log := logr.FromContextOrDiscard(ctx).WithValues("objOp", op, "obj", rd.logInfoMap(sc))
 	switch op {
 	case ResourceDiffOpUpdate:
-		patchResult, err := om.DefaultPatchMaker.Calculate(rd.Observed, rd.Desired, calcOptions...)
+		patchResult, err := patchCalculate(rd.Observed, rd.Desired, calcOptions...)
 		if err != nil {
 			// delete objects where there is a diff calculation error
-			if rd.DeleteOnChange {
+			if rd.DeleteOnPatchCalculationError {
+				log.Info("deleting object due to patch calculation error")
 				return client.IgnoreNotFound(sc.Delete(ctx, rd.Observed, client.PropagationPolicy(v1.DeletePropagationBackground)))
 			}
 			return err
@@ -237,6 +247,7 @@ func (rd ResourceDiff) Apply(ctx context.Context, sc k8sutil.SchemedClient, owne
 			log.V(2).Info("object is up-to-date")
 			return nil
 		} else if rd.DeleteOnChange {
+			log.Info("deleting object due to delete on change")
 			return client.IgnoreNotFound(sc.Delete(ctx, rd.Observed, client.PropagationPolicy(v1.DeletePropagationBackground)))
 		} else {
 			if rd.IsSensitive {
@@ -249,7 +260,7 @@ func (rd ResourceDiff) Apply(ctx context.Context, sc k8sutil.SchemedClient, owne
 			}
 			if rd.PatchUpdates {
 				// need to make sure the last-applied annot is IN the patch so we have to do it again:
-				patchResult, err = om.DefaultPatchMaker.Calculate(rd.Observed, rd.Desired, calcOptions...)
+				patchResult, err = patchCalculate(rd.Observed, rd.Desired, calcOptions...)
 				if err != nil {
 					return err
 				}
