@@ -56,7 +56,8 @@ type Logic[S Subject, C any] interface {
 	// ConfigureController is called once at startup to associate informers and caches.
 	ConfigureController(*builder.Builder, cluster.Cluster) error
 	// FinalizerKey returns the finalizer to attach to subjects managed by this operator, return "" to disable
-	// finalization.
+	// finalization. Without a finalizer, a subject with a deletionTimestamp is not reconciled (SubjectDeleting), and
+	// its children are left to the Kubernetes garbage collector through their owner references.
 	FinalizerKey() string
 	// Finalize is called at least once when a subject is deleted, and must succeed before the finalizer key
 	// can be removed from the subject. It must be idempotent.
@@ -89,6 +90,7 @@ type Logic[S Subject, C any] interface {
 }
 
 // WithoutFinalizationMixin ia a convenience type to embed in your Logic if you don't need finalization.
+// Subjects being deleted are not reconciled, see Logic.FinalizerKey.
 type WithoutFinalizationMixin[S Subject, C any] struct{}
 
 func (t WithoutFinalizationMixin[_, _]) FinalizerKey() string {
@@ -304,6 +306,7 @@ const (
 	SubjectNotFound        ReconciliationStatus = "SubjectNotFound"
 	PartitionMismatch      ReconciliationStatus = "PartitionMismatch"
 	SubjectSuspended       ReconciliationStatus = "SubjectSuspended"
+	SubjectDeleting        ReconciliationStatus = "SubjectDeleting"
 	SubjectInvalid         ReconciliationStatus = "SubjectInvalid"
 	AlreadyFinalized       ReconciliationStatus = "AlreadyFinalized"
 	FinalizationError      ReconciliationStatus = "FinalizationError"
@@ -346,6 +349,11 @@ func (g *Reconciler[S, C]) reconcile(ctx *Context[S, C]) (error, ReconciliationS
 	if ctx.Subject.IsSuspended() {
 		ctx.Log.Info("subject is suspended")
 		return nil, SubjectSuspended
+	}
+
+	if ds := ctx.Subject.GetDeletionTimestamp(); !ds.IsZero() && g.Logic.FinalizerKey() == "" {
+		ctx.Log.V(1).Info("subject is logically deleted and has no finalizer, skipping", "deletionTimestamp", ds)
+		return nil, SubjectDeleting
 	}
 
 	if err = g.Logic.Validate(ctx.Subject); err != nil {
