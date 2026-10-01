@@ -39,9 +39,20 @@ type Reconciler[S Subject, C any] struct {
 	CurrentPartition string
 }
 
+// Finalizer controls whether and how subjects are finalized on deletion.
+type Finalizer[S Subject, C any] interface {
+	// FinalizerKey returns the finalizer to attach to subjects managed by this operator, return "" to disable
+	// finalization.
+	FinalizerKey() string
+	// Finalize is called at least once when a subject is deleted, and must succeed before the finalizer key
+	// can be removed from the subject. It must be idempotent.
+	Finalize(*Context[S, C]) (FinalizationAction, error)
+}
+
 // Logic is a bundle of methods that define the actual behavior of the generic reconciliation process
 // when attached to some concrete CRD type.
 type Logic[S Subject, C any] interface {
+	Finalizer[S, C]
 	// NewSubject creates a new, empty, instance of the subject CRD type.
 	NewSubject() S
 	// GetConfig returns a "config" for a new reconciliation Context. Config is used to pass contextual or
@@ -55,12 +66,6 @@ type Logic[S Subject, C any] interface {
 	IsStatusEqual(S, S) bool
 	// ConfigureController is called once at startup to associate informers and caches.
 	ConfigureController(*builder.Builder, cluster.Cluster) error
-	// FinalizerKey returns the finalizer to attach to subjects managed by this operator, return "" to disable
-	// finalization.
-	FinalizerKey() string
-	// Finalize is called at least once when a subject is deleted, and must succeed before the finalizer key
-	// can be removed from the subject. It must be idempotent.
-	Finalize(*Context[S, C]) (FinalizationAction, error)
 	// Validate checks the validity of the provided subject and prevents reconciliation if invalid.
 	// It is called in both the validating webhook AND during reconciliation as a preflight check.
 	Validate(S) error
@@ -91,12 +96,14 @@ type Logic[S Subject, C any] interface {
 // WithoutFinalizationMixin ia a convenience type to embed in your Logic if you don't need finalization.
 type WithoutFinalizationMixin[S Subject, C any] struct{}
 
+var _ Finalizer[Subject, any] = WithoutFinalizationMixin[Subject, any]{}
+
 func (t WithoutFinalizationMixin[_, _]) FinalizerKey() string {
 	return "" // we do not set a finalizer
 }
 
-func (t WithoutFinalizationMixin[S, C]) Finalize(_ *Context[S, C]) error {
-	return nil
+func (t WithoutFinalizationMixin[S, C]) Finalize(_ *Context[S, C]) (FinalizationAction, error) {
+	return FinalizationCompleted, nil
 }
 
 type Context[S Subject, C any] struct {
