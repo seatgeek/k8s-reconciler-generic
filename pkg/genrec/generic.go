@@ -39,9 +39,20 @@ type Reconciler[S Subject, C any] struct {
 	CurrentPartition string
 }
 
+// Finalizer controls whether and how subjects are finalized on deletion.
+type Finalizer[S Subject, C any] interface {
+	// FinalizerKey returns the finalizer to attach to subjects managed by this operator, return "" to disable
+	// finalization.
+	FinalizerKey() string
+	// Finalize is called when a deleting subject still has the configured finalizer. It must succeed before
+	// the finalizer can be removed, and it must be idempotent.
+	Finalize(*Context[S, C]) (FinalizationAction, error)
+}
+
 // Logic is a bundle of methods that define the actual behavior of the generic reconciliation process
 // when attached to some concrete CRD type.
 type Logic[S Subject, C any] interface {
+	Finalizer[S, C]
 	// NewSubject creates a new, empty, instance of the subject CRD type.
 	NewSubject() S
 	// GetConfig returns a "config" for a new reconciliation Context. Config is used to pass contextual or
@@ -93,12 +104,14 @@ type Logic[S Subject, C any] interface {
 // Subjects being deleted are not reconciled, see Logic.FinalizerKey.
 type WithoutFinalizationMixin[S Subject, C any] struct{}
 
+var _ Finalizer[Subject, any] = WithoutFinalizationMixin[Subject, any]{}
+
 func (t WithoutFinalizationMixin[_, _]) FinalizerKey() string {
 	return "" // we do not set a finalizer
 }
 
-func (t WithoutFinalizationMixin[S, C]) Finalize(_ *Context[S, C]) error {
-	return nil
+func (t WithoutFinalizationMixin[S, C]) Finalize(_ *Context[S, C]) (FinalizationAction, error) {
+	return FinalizationCompleted, nil
 }
 
 type Context[S Subject, C any] struct {
