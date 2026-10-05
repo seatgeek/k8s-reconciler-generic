@@ -44,8 +44,8 @@ type Finalizer[S Subject, C any] interface {
 	// FinalizerKey returns the finalizer to attach to subjects managed by this operator, return "" to disable
 	// finalization.
 	FinalizerKey() string
-	// Finalize is called at least once when a subject is deleted, and must succeed before the finalizer key
-	// can be removed from the subject. It must be idempotent.
+	// Finalize is called when a deleting subject still has the configured finalizer. It must succeed before
+	// the finalizer can be removed, and it must be idempotent.
 	Finalize(*Context[S, C]) (FinalizationAction, error)
 }
 
