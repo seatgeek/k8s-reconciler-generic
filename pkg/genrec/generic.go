@@ -295,6 +295,12 @@ func (g *Reconciler[S, C]) Reconcile(ctx context.Context, request reconcile.Requ
 			return reconcile.Result{}, nil
 		} else if errors.Is(err, ErrRetry) {
 			return reconcile.Result{Requeue: true}, nil
+		} else if isShutdownCancellation(ctx, err) {
+			// controller-runtime cancels the reconcile context when the manager stops (pod eviction, rollout,
+			// lost leadership). In-flight calls then fail with context.Canceled. Nothing is lost: the next leader
+			// lists and reconciles every object on startup, so don't report this as a reconcile error.
+			rctx.Log.V(1).Info("reconciliation interrupted by shutdown", "state", terminalState)
+			return reconcile.Result{}, nil
 		} else {
 			// these are real errors that will trigger incrementing kubebuilder's
 			// controller_runtime_reconcile_errors_total metric:
@@ -310,6 +316,14 @@ func (g *Reconciler[S, C]) Reconcile(ctx context.Context, request reconcile.Requ
 	}
 
 	return reconcile.Result{}, nil
+}
+
+// isShutdownCancellation reports whether err comes from the reconcile context itself being canceled, which
+// controller-runtime only does when the controller is stopping. A deadline on that context (for example
+// ReconciliationTimeout) yields context.DeadlineExceeded from ctx.Err(), and a cancel of a context derived inside
+// the reconcile leaves ctx.Err() nil, so both of those are still reported as errors.
+func isShutdownCancellation(ctx context.Context, err error) bool {
+	return errors.Is(ctx.Err(), context.Canceled) && errors.Is(err, context.Canceled)
 }
 
 type ReconciliationStatus string

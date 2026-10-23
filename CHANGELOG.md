@@ -1,5 +1,11 @@
 # Changelog
 
+## [v1.15.1] - 2026-10-23
+
+### Fixed
+
+* `Reconcile` no longer reports an error when the reconcile context was canceled because the controller is shutting down (pod eviction, rollout, lost leadership) and the reconciliation failed with `context.Canceled` as a result. It returns no error and logs at V(1) instead, so these no longer show up as `Reconciler error` logs or in `controller_runtime_reconcile_errors_total`. Nothing is lost, because the next leader reconciles every object on startup. Deadlines on the reconcile context, cancellations of contexts derived inside the reconcile, and any other error during shutdown are still reported. `ReconcileComplete` still receives the original error.
+
 ## [v1.15.0] - 2026-10-01
 
 ### Changed
